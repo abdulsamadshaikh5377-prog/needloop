@@ -6,5 +6,5 @@ export const firebaseConfig = {
   projectId: "needloop-f4ae9",
   storageBucket: "needloop-f4ae9.firebasestorage.app",
   messagingSenderId: "869197546823",
-  appId: "1:869197546823:web:1a028cfc44bd96714b3862"
+  appId: "1:869197546823:web:1a028cfc44bd96714b3862",
 };
