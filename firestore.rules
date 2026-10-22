@@ -1,0 +1,105 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+    function signedIn() { return request.auth != null; }
+    function me() { return request.auth.uid; }
+    function isAdmin() { return signedIn() && exists(/databases/$(db)/documents/admins/$(me())); }
+    function str(v, max) { return v is string && v.size() > 0 && v.size() <= max; }
+    function cats() { return ['borrow','ask','build','give','local']; }
+
+    // admins: set ONLY by hand in the Firebase console. Clients can read their own doc, never write.
+    match /admins/{uid} { allow read: if signedIn() && me() == uid; allow write: if false; }
+
+    // public profile (no email stored here)
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create: if me() == uid && request.resource.data.keys().hasOnly(['name','bio','city','createdAt'])
+        && str(request.resource.data.name, 60) && request.resource.data.bio is string && request.resource.data.bio.size() <= 500
+        && request.resource.data.city is string && request.resource.data.city.size() <= 60;
+      allow update: if me() == uid && request.resource.data.keys().hasOnly(['name','bio','city','createdAt'])
+        && request.resource.data.createdAt == resource.data.createdAt
+        && str(request.resource.data.name, 60) && request.resource.data.bio.size() <= 500 && request.resource.data.city.size() <= 60;
+      allow delete: if false;
+    }
+
+    match /posts/{pid} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.ownerId == me()
+        && request.resource.data.keys().hasOnly(['ownerId','ownerName','category','type','title','description','detail','location','status','createdAt'])
+        && request.resource.data.category in cats() && request.resource.data.type in ['offer','need']
+        && str(request.resource.data.title, 120) && str(request.resource.data.description, 3000)
+        && request.resource.data.detail is string && request.resource.data.detail.size() <= 300
+        && request.resource.data.location is string && request.resource.data.location.size() <= 100
+        && request.resource.data.status == 'open' && str(request.resource.data.ownerName, 60);
+      allow update: if signedIn() && (resource.data.ownerId == me())
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.category == resource.data.category
+        && request.resource.data.status in ['open','closed']
+        && str(request.resource.data.title, 120) && str(request.resource.data.description, 3000)
+        && request.resource.data.detail.size() <= 300 && request.resource.data.location.size() <= 100;
+      allow delete: if signedIn() && (resource.data.ownerId == me() || isAdmin());
+
+      match /replies/{rid} {
+        allow read: if signedIn();
+        allow create: if signedIn() && request.resource.data.authorId == me()
+          && request.resource.data.keys().hasOnly(['authorId','authorName','text','helpful','createdAt'])
+          && str(request.resource.data.text, 2000) && str(request.resource.data.authorName, 60) && request.resource.data.helpful == false;
+        // post owner may ONLY flip "helpful"
+        allow update: if signedIn() && get(/databases/$(db)/documents/posts/$(pid)).data.ownerId == me()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['helpful']) && request.resource.data.helpful is bool;
+        allow delete: if signedIn() && (resource.data.authorId == me() || isAdmin()
+          || get(/databases/$(db)/documents/posts/$(pid)).data.ownerId == me());
+      }
+
+      // request doc id == requester uid (one request per person per post)
+      match /requests/{rid} {
+        allow read: if signedIn() && (rid == me() || get(/databases/$(db)/documents/posts/$(pid)).data.ownerId == me());
+        allow create: if signedIn() && rid == me() && request.resource.data.requesterId == me()
+          && request.resource.data.keys().hasOnly(['requesterId','requesterName','message','status','createdAt'])
+          && request.resource.data.status == 'pending' && str(request.resource.data.message, 1000)
+          && str(request.resource.data.requesterName, 60)
+          && get(/databases/$(db)/documents/posts/$(pid)).data.ownerId != me()
+          && get(/databases/$(db)/documents/posts/$(pid)).data.status == 'open';
+        allow update: if signedIn() && get(/databases/$(db)/documents/posts/$(pid)).data.ownerId == me()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+          && request.resource.data.status in ['accepted','rejected','pending'];
+        allow delete: if signedIn() && rid == me();
+      }
+    }
+
+    // conversation id = two uids sorted and joined by "_"
+    match /conversations/{cid} {
+      allow read: if signedIn() && me() in resource.data.participants;
+      allow create: if signedIn() && me() in request.resource.data.participants
+        && request.resource.data.participants.size() == 2 && request.resource.data.participants.hasAll(cid.split('_'));
+      allow update: if signedIn() && me() in resource.data.participants
+        && request.resource.data.participants == resource.data.participants;
+      allow delete: if false;
+      match /messages/{mid} {
+        allow read: if signedIn() && me() in cid.split('_');
+        allow create: if signedIn() && me() in cid.split('_') && request.resource.data.senderId == me()
+          && request.resource.data.keys().hasOnly(['senderId','text','createdAt']) && str(request.resource.data.text, 2000);
+        allow update, delete: if false;
+      }
+    }
+
+    match /notifications/{nid} {
+      allow read, delete: if signedIn() && resource.data.toUid == me();
+      allow create: if signedIn() && request.resource.data.fromUid == me() && request.resource.data.toUid != me()
+        && request.resource.data.keys().hasOnly(['toUid','fromUid','text','link','read','createdAt'])
+        && str(request.resource.data.text, 200) && request.resource.data.read == false;
+      allow update: if signedIn() && resource.data.toUid == me()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+    }
+
+    match /reports/{id} {
+      allow create: if signedIn() && request.resource.data.reporterId == me()
+        && request.resource.data.keys().hasOnly(['reporterId','postId','postTitle','reason','status','createdAt'])
+        && str(request.resource.data.reason, 500) && request.resource.data.status == 'open';
+      allow read, update, delete: if isAdmin();
+    }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}
